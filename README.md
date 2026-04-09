@@ -52,6 +52,12 @@ condenclaw --limit 3 -v
 # Pull the exact raw payload for suspicious events 3 and 7
 condenclaw --limit -1 --raw-event 3,7
 
+# Show cumulative estimated savings versus ingesting the full raw session log
+condenclaw savings
+
+# Show savings for a specific OpenClaw agent
+condenclaw savings --agent worker
+
 ```
 
 ## Layered Debugging
@@ -67,6 +73,7 @@ condenclaw --limit -1 --raw-event 3,7
 | Flag | Description |
 | :--- | :--- |
 | `[file]` | Path to a log file or session JSONL. Defaults to the latest session for your default OpenClaw agent. |
+| `savings` | Print cumulative estimated token savings from using CondenClaw instead of ingesting the full raw session logs. Supports `--agent <id>`. |
 | `--limit <N>` | Limit runs shown. Use negative numbers for latest (e.g. -1 is latest). |
 | `--agent <id>` | Read sessions for a specific OpenClaw agent instead of the default agent. |
 | `--session-dir <path>` | Override the session directory used for local session discovery. |

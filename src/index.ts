@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { Command } from 'commander';
@@ -28,6 +29,14 @@ interface SessionListing {
   sessions?: Array<{ sessionId?: string; sessionFile?: string; updatedAt?: number; agentId?: string }>;
 }
 
+interface UsageStats {
+  agent: string;
+  usage_count: number;
+  tail_characters: number;
+  condenclaw_characters: number;
+  saved_characters: number;
+}
+
 const ISO_TS_RE = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?/;
 const SUMMARY_PREVIEW = 100;
 const DETAIL_PREVIEW = 2000;
@@ -37,6 +46,117 @@ const SUGGESTIONS: Record<string, string[]> = {
   error: ["Inspect tool or model errors in the logs.", "Validate tool inputs before calling them.", "Add error handling or controlled retries."],
   no_model_step: ["Ensure the model is invoked after user input.", "Check routing or planning logic before tool execution."],
 };
+
+function getOpenClawHome(): string | null {
+  const home = process.env.HOME || process.env.USERPROFILE || '';
+  return home ? path.join(home, '.openclaw') : null;
+}
+
+function getStatsFile(): string | null {
+  const openClawHome = getOpenClawHome();
+  if (!openClawHome) return null;
+  return path.join(openClawHome, 'condenclaw-savings.jsonl');
+}
+
+function getFallbackStatsFile(): string {
+  return process.env.CONDENCLAW_STATE_DIR
+    ? path.join(process.env.CONDENCLAW_STATE_DIR, 'savings.jsonl')
+    : process.env.XDG_STATE_HOME
+      ? path.join(process.env.XDG_STATE_HOME, 'condenclaw', 'savings.jsonl')
+      : path.join(os.tmpdir(), 'condenclaw', 'savings.jsonl');
+}
+
+function resolveAgentId(targetFile?: string | null, explicitAgent?: string): string {
+  if (explicitAgent) return explicitAgent;
+  if (targetFile) {
+    const normalized = path.resolve(targetFile);
+    const parts = normalized.split(path.sep).filter(Boolean);
+    const agentsIndex = parts.lastIndexOf('agents');
+    if (agentsIndex !== -1 && agentsIndex + 1 < parts.length) {
+      return parts[agentsIndex + 1] || 'main';
+    }
+  }
+
+  return 'main';
+}
+
+function loadUsageStatsFile(): { file: string; rows: UsageStats[] } {
+  const candidates = [getStatsFile(), getFallbackStatsFile()].filter((value): value is string => !!value);
+
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+
+      const rows = fs.readFileSync(file, 'utf-8')
+        .split('\n')
+        .map(line => line.trim())
+        .filter(Boolean)
+        .map(line => JSON.parse(line) as Partial<UsageStats>)
+        .map(row => ({
+          agent: typeof row.agent === 'string' && row.agent ? row.agent : 'main',
+          usage_count: Number.isFinite(row.usage_count) ? Math.max(0, Number(row.usage_count)) : 0,
+          tail_characters: Number.isFinite(row.tail_characters) ? Math.max(0, Number(row.tail_characters)) : 0,
+          condenclaw_characters: Number.isFinite(row.condenclaw_characters) ? Math.max(0, Number(row.condenclaw_characters)) : 0,
+          saved_characters: Number.isFinite(row.saved_characters) ? Math.max(0, Number(row.saved_characters)) : 0,
+        }));
+
+      return { file, rows };
+    } catch {
+      continue;
+    }
+  }
+
+  return {
+    file: candidates[0] || getFallbackStatsFile(),
+    rows: [],
+  };
+}
+
+function saveUsageStatsFile(file: string, rows: UsageStats[]) {
+  const payload = rows.map(row => JSON.stringify(row)).join('\n');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, payload ? `${payload}\n` : '');
+}
+
+function getAgentUsageStats(agent: string): UsageStats {
+  const { rows } = loadUsageStatsFile();
+  return rows.find(row => row.agent === agent) || {
+    agent,
+    usage_count: 0,
+    tail_characters: 0,
+    condenclaw_characters: 0,
+    saved_characters: 0,
+  };
+}
+
+function recordUsage(tailCharacters: number, condenclawCharacters: number, targetFile?: string | null, explicitAgent?: string) {
+  const { file, rows } = loadUsageStatsFile();
+  const agent = resolveAgentId(targetFile, explicitAgent);
+  const nextRows = [...rows];
+  const index = nextRows.findIndex(row => row.agent === agent);
+  const current = index === -1
+    ? { agent, usage_count: 0, tail_characters: 0, condenclaw_characters: 0, saved_characters: 0 }
+    : nextRows[index];
+
+  current.usage_count += 1;
+  current.tail_characters += Math.max(0, tailCharacters);
+  current.condenclaw_characters += Math.max(0, condenclawCharacters);
+  current.saved_characters = Math.max(0, current.tail_characters - current.condenclaw_characters);
+
+  if (index === -1) {
+    nextRows.push(current);
+  } else {
+    nextRows[index] = current;
+  }
+
+  saveUsageStatsFile(file, nextRows.sort((a, b) => a.agent.localeCompare(b.agent)));
+}
+
+function formatSavingsMessage(stats: UsageStats): string {
+  const savedTokens = Math.floor(Math.max(0, stats.saved_characters) / 4);
+  const formattedTokens = new Intl.NumberFormat('en-US').format(savedTokens);
+  return `Using condenclaw you have saved ${formattedTokens} tokens so far.`;
+}
 
 function listSessionFiles(sessionDir: string): string[] {
   if (!fs.existsSync(sessionDir)) return [];
@@ -360,10 +480,10 @@ function printRawEvents(run: Run, rawEventNumbers: number[]) {
 
   if (!selected.length) return;
 
-  console.log("\nRaw events:");
+  process.stdout.write("\nRaw events:\n");
   selected.forEach(({ eventNumber, event }) => {
-    console.log(`\n--- Event ${eventNumber} (line ${event!.line_no}) ---`);
-    console.log(stringifyValue(event!.raw));
+    process.stdout.write(`\n--- Event ${eventNumber} (line ${event!.line_no}) ---\n`);
+    process.stdout.write(`${stringifyValue(event!.raw)}\n`);
   });
 }
 
@@ -372,25 +492,25 @@ function printRun(run: Run, idx: number, verbose: boolean, rawEventNumbers: numb
   const end = run.events[run.events.length - 1].timestamp;
   const duration = (start && end) ? `${((end.getTime() - start.getTime()) / 1000).toFixed(1)}s` : '';
   
-  console.log(`\n=== Run #${idx} | session=${run.session_id || 'no-session'} (${duration}) ===`);
+  process.stdout.write(`\n=== Run #${idx} | session=${run.session_id || 'no-session'} (${duration}) ===\n`);
   run.events.forEach((e, i) => {
     const ts = e.timestamp ? e.timestamp.toISOString().split('T')[1].split('.')[0] : '??:??:??';
-    console.log(`${String(i + 1).padStart(2, '0')}. [${ts}] line=${e.line_no} ${e.summary}`);
+    process.stdout.write(`${String(i + 1).padStart(2, '0')}. [${ts}] line=${e.line_no} ${e.summary}\n`);
     if (verbose) {
       if (e.type === 'tool_call') {
-        console.log(`    👉 Input:\n${previewValue(e.input || "", DETAIL_PREVIEW)}`);
+        process.stdout.write(`    👉 Input:\n${previewValue(e.input || "", DETAIL_PREVIEW)}\n`);
       }
       if (e.type === 'tool_result') {
-        console.log(`    👈 Output:\n${previewValue(e.output || "", DETAIL_PREVIEW)}`);
+        process.stdout.write(`    👈 Output:\n${previewValue(e.output || "", DETAIL_PREVIEW)}\n`);
       }
     }
   });
 
   const ftype = detectFailure(run);
-  console.log(`\nStatus: ${ftype}`);
+  process.stdout.write(`\nStatus: ${ftype}\n`);
   if (SUGGESTIONS[ftype]) {
-    console.log("\nSuggestions:");
-    SUGGESTIONS[ftype].forEach(s => console.log(`- ${s}`));
+    process.stdout.write("\nSuggestions:\n");
+    SUGGESTIONS[ftype].forEach(s => process.stdout.write(`- ${s}\n`));
   }
 
   printRawEvents(run, rawEventNumbers);
@@ -400,6 +520,17 @@ async function main() {
   const program = new Command('condenclaw');
   program
     .description('Condense OpenClaw session transcripts into a layered debugging view.')
+    .helpOption('-h, --help', 'List commands, flags, and usage examples')
+    .addHelpText('after', `
+Examples:
+  $ condenclaw --limit -1
+  $ condenclaw --agent worker --limit -1 -v
+  $ condenclaw --session ~/.openclaw/agents/main/sessions/<session>.jsonl --raw-event 3,7
+  $ condenclaw --limit -1 --json
+  $ condenclaw savings
+  $ condenclaw savings --agent worker
+`)
+  const inspectCommand = program
     .argument('[file]', 'Log file path')
     .option('--json', 'Output JSON')
     .option('--limit <n>', 'Limit total runs (e.g., -1 for latest)', (v: string) => parseInt(v))
@@ -408,74 +539,96 @@ async function main() {
     .option('--session <path>', 'Specific session file')
     .option('--raw-event <numbers>', 'Show exact raw payloads for specific event numbers, e.g. 3 or 3,7')
     .option('-v, --verbose', 'Verbose tool data')
-    .helpOption('-h, --help', 'List commands, flags, and usage examples')
-    .addHelpText('after', `
-Examples:
-  $ condenclaw --limit -1
-  $ condenclaw --agent worker --limit -1 -v
-  $ condenclaw --session ~/.openclaw/agents/main/sessions/<session>.jsonl --raw-event 3,7
-  $ condenclaw --limit -1 --json
-`)
-    .parse(process.argv);
+    .action((file: string | undefined, options: any) => {
+      let targetFile: string | null | undefined = file;
 
-  const options = program.opts();
-  let targetFile: string | null | undefined = program.args[0];
-  let inputLines: string[] = [];
+      if (options.session) targetFile = options.session;
+      if (!targetFile) {
+        targetFile = resolveDefaultSessionFile(options.agent, options.sessionDir);
+      }
+      if (!targetFile) {
+        console.error('No OpenClaw session file found. Use --agent, --session-dir, or --session to target a transcript explicitly.');
+        process.exit(1);
+      }
 
-  if (options.session) targetFile = options.session;
-  if (!targetFile) {
-    targetFile = resolveDefaultSessionFile(options.agent, options.sessionDir);
-  }
-  if (!targetFile) {
-    console.error('No OpenClaw session file found. Use --agent, --session-dir, or --session to target a transcript explicitly.');
-    process.exit(1);
-  }
-  const resolvedTargetFile = targetFile;
-  if (fs.existsSync(resolvedTargetFile)) {
-    inputLines = fs.readFileSync(resolvedTargetFile, 'utf-8').split('\n');
-  } else {
-    console.error(`File not found: ${resolvedTargetFile}`);
-    process.exit(1);
-  }
+      const resolvedTargetFile = targetFile;
+      if (!fs.existsSync(resolvedTargetFile)) {
+        console.error(`File not found: ${resolvedTargetFile}`);
+        process.exit(1);
+      }
 
-  const events = buildEvents(parseLines(inputLines));
-  const allRuns = splitRuns(events);
-  let displayRuns = allRuns;
-  const rawEventNumbers = parseRawEventSelection(options.rawEvent);
+      const fileContent = fs.readFileSync(resolvedTargetFile, 'utf-8');
+      const inputLines = fileContent.split('\n');
+      const events = buildEvents(parseLines(inputLines));
+      const allRuns = splitRuns(events);
+      let displayRuns = allRuns;
+      const rawEventNumbers = parseRawEventSelection(options.rawEvent);
 
-  if (options.limit !== undefined) {
-    const limit = options.limit;
-    if (limit < 0) {
-      displayRuns = allRuns.slice(limit);
-    } else if (limit > 0) {
-      displayRuns = allRuns.slice(0, limit);
-    }
-  }
+      if (options.limit !== undefined) {
+        const limit = options.limit;
+        if (limit < 0) {
+          displayRuns = allRuns.slice(limit);
+        } else if (limit > 0) {
+          displayRuns = allRuns.slice(0, limit);
+        }
+      }
 
-  if (options.json) {
-    const out = displayRuns.map(r => ({
-      run_number: allRuns.indexOf(r) + 1,
-      session_id: r.session_id,
-      failure_type: detectFailure(r),
-      suggestions: SUGGESTIONS[detectFailure(r)] || [],
-      events: r.events.map((e, i) => ({
-        event_number: i + 1,
-        line_no: e.line_no,
-        timestamp: e.timestamp,
-        type: e.type,
-        summary: e.summary,
-        detail: options.verbose ? {
-          tool: e.tool,
-          input: e.input,
-          output: e.output
-        } : undefined,
-        raw: rawEventNumbers.includes(i + 1) ? e.raw : undefined
-      }))
-    }));
-    console.log(JSON.stringify({ runs: out }, null, 2));
-  } else {
-    displayRuns.forEach(r => printRun(r, allRuns.indexOf(r) + 1, !!options.verbose, rawEventNumbers));
-  }
+      let renderedOutput = '';
+      const originalWrite = process.stdout.write.bind(process.stdout);
+      const capturingWrite = ((chunk: any, encoding?: any, cb?: any) => {
+        const resolvedEncoding = typeof encoding === 'string' ? encoding as BufferEncoding : undefined;
+        const text = Buffer.isBuffer(chunk) ? chunk.toString(resolvedEncoding) : String(chunk);
+        renderedOutput += text;
+        return originalWrite(chunk, encoding, cb);
+      }) as typeof process.stdout.write;
+
+      process.stdout.write = capturingWrite;
+      try {
+        if (options.json) {
+          const out = displayRuns.map(r => ({
+            run_number: allRuns.indexOf(r) + 1,
+            session_id: r.session_id,
+            failure_type: detectFailure(r),
+            suggestions: SUGGESTIONS[detectFailure(r)] || [],
+            events: r.events.map((e, i) => ({
+              event_number: i + 1,
+              line_no: e.line_no,
+              timestamp: e.timestamp,
+              type: e.type,
+              summary: e.summary,
+              detail: options.verbose ? {
+                tool: e.tool,
+                input: e.input,
+                output: e.output
+              } : undefined,
+              raw: rawEventNumbers.includes(i + 1) ? e.raw : undefined
+            }))
+          }));
+          process.stdout.write(`${JSON.stringify({ runs: out }, null, 2)}\n`);
+        } else {
+          displayRuns.forEach(r => printRun(r, allRuns.indexOf(r) + 1, !!options.verbose, rawEventNumbers));
+        }
+      } finally {
+        process.stdout.write = originalWrite;
+      }
+
+      const tailCharacters = fileContent.length;
+      const condenclawCharacters = renderedOutput.length;
+      recordUsage(tailCharacters, condenclawCharacters, resolvedTargetFile, options.agent);
+    });
+
+  program
+    .command('savings')
+    .description('Show cumulative token savings from using condenclaw instead of raw log ingestion.')
+    .option('--agent <id>', 'Show savings for a specific OpenClaw agent')
+    .action(function (this: Command) {
+      const options = this.opts<{ agent?: string }>();
+      const stats = getAgentUsageStats(resolveAgentId(undefined, options.agent));
+      process.stdout.write(`${formatSavingsMessage(stats)}\n`);
+    });
+
+  inspectCommand;
+  program.parse(process.argv);
 }
 
 main();
