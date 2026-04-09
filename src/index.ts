@@ -397,8 +397,9 @@ function printRun(run: Run, idx: number, verbose: boolean, rawEventNumbers: numb
 }
 
 async function main() {
-  const program = new Command();
+  const program = new Command('condenclaw');
   program
+    .description('Condense OpenClaw session transcripts into a layered debugging view.')
     .argument('[file]', 'Log file path')
     .option('--json', 'Output JSON')
     .option('--limit <n>', 'Limit total runs (e.g., -1 for latest)', (v: string) => parseInt(v))
@@ -407,6 +408,14 @@ async function main() {
     .option('--session <path>', 'Specific session file')
     .option('--raw-event <numbers>', 'Show exact raw payloads for specific event numbers, e.g. 3 or 3,7')
     .option('-v, --verbose', 'Verbose tool data')
+    .helpOption('-h, --help', 'List commands, flags, and usage examples')
+    .addHelpText('after', `
+Examples:
+  $ condenclaw --limit -1
+  $ condenclaw --agent worker --limit -1 -v
+  $ condenclaw --session ~/.openclaw/agents/main/sessions/<session>.jsonl --raw-event 3,7
+  $ condenclaw --limit -1 --json
+`)
     .parse(process.argv);
 
   const options = program.opts();

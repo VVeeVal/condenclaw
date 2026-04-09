@@ -11,11 +11,30 @@ Install globally via npm:
 npm install -g condenclaw
 ```
 
+Show help:
+```bash
+condenclaw --help
+```
+
 ## OpenClaw Configuration
 
 To save massively on tokens, add this to your `AGENTS.md` or system rules:
 
 > "NEVER use `tail` to read your own session logs. When debugging or explaining a failure, ALWAYS run `condenclaw --limit -1` first for a structured overview. Use `condenclaw --limit -1 -v` for detailed event payloads, and `condenclaw --limit -1 --raw-event <n>` when you need the exact raw event that looks suspicious."
+
+## Bootstrap Prompt
+
+Use this as a one-shot bootstrap prompt for an OpenClaw agent:
+
+```text
+Install and configure CondenClaw for this machine.
+
+1. Run `npm install -g condenclaw`.
+2. Run `condenclaw --help` and confirm the command is available.
+3. Update my OpenClaw agent rules (`AGENTS.md`, system rules, or equivalent persistent instruction file) with this rule:
+
+"NEVER use `tail` to read your own session logs. When debugging or explaining a failure, ALWAYS run `condenclaw --limit -1` first for a structured overview. Use `condenclaw --limit -1 -v` for detailed event payloads, and `condenclaw --limit -1 --raw-event <n>` when you need the exact raw event that looks suspicious."
+```
 
 ## Usage
 
@@ -55,3 +74,4 @@ condenclaw --limit -1 --raw-event 3,7
 | `--raw-event <numbers>` | Show exact raw payloads for specific 1-based event numbers, e.g. `3` or `3,7`. |
 | `-v, --verbose` | Show the detailed event layer with expanded tool inputs and outputs. |
 | `--json` | Output the behavioral timeline in machine-readable JSON. |
+| `-h, --help` | List commands, flags, and usage examples. |
